@@ -1,10 +1,13 @@
 # Standalone user program build rules.
 
 USER_BUILD_DIR := $(BUILD_DIR)/user
-USER_ELF       := $(USER_BUILD_DIR)/hello.elf
+USER_PROGRAMS  := hello once
+USER_OBJS      := $(addprefix $(USER_BUILD_DIR)/,$(addsuffix .o,$(USER_PROGRAMS)))
+USER_ELFS      := $(addprefix $(USER_BUILD_DIR)/,$(addsuffix .elf,$(USER_PROGRAMS)))
 USER_INITRAMFS := $(USER_BUILD_DIR)/initramfs.img
 USER_BLOB_S    := $(USER_BUILD_DIR)/initramfs_blob.S
 USER_BLOB_O    := $(USER_BUILD_DIR)/initramfs_blob.o
+USER_INITRAMFS_FILES := $(foreach prog,$(USER_PROGRAMS),--file /bin/$(prog)=$(USER_BUILD_DIR)/$(prog).elf)
 
 USER_CFLAGS = \
 	$(CC_TARGET_FLAGS) \
@@ -28,19 +31,19 @@ USER_LDFLAGS = \
 	-Wl,--no-relax \
 	-g
 
-$(USER_BUILD_DIR)/hello.o: user/hello.S include/syscall_numbers.h
+$(USER_BUILD_DIR)/%.o: user/%.S include/syscall_numbers.h
 	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
-$(USER_ELF): $(USER_BUILD_DIR)/hello.o user/user.lds
+$(USER_BUILD_DIR)/%.elf: $(USER_BUILD_DIR)/%.o user/user.lds
 	@mkdir -p $(dir $@)
-	$(CC) $(USER_LDFLAGS) $(USER_BUILD_DIR)/hello.o -o $@
+	$(CC) $(USER_LDFLAGS) $< -o $@
 
-$(USER_INITRAMFS): $(USER_ELF) scripts/build-initramfs.py
+$(USER_INITRAMFS): $(USER_ELFS) scripts/build-initramfs.py
 	@mkdir -p $(dir $@)
 	python3 scripts/build-initramfs.py \
 		--output $@ \
-		--file /bin/hello=$(USER_ELF)
+		$(USER_INITRAMFS_FILES)
 
 $(USER_BLOB_S): $(USER_INITRAMFS) mk/user.mk
 	@mkdir -p $(dir $@)
@@ -59,8 +62,9 @@ $(USER_BLOB_O): $(USER_BLOB_S)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS_BASE) $(INCLUDES) -MMD -MP -c $< -o $@
 
-user-elf: $(USER_ELF) $(USER_INITRAMFS)
-	@echo "User ELF generated: $(USER_ELF)"
+user-elf: $(USER_ELFS) $(USER_INITRAMFS)
+	@echo "User ELFs generated: $(USER_ELFS)"
 	@echo "Initramfs generated: $(USER_INITRAMFS)"
 
 .PHONY: user-elf
+.SECONDARY: $(USER_OBJS)

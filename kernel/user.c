@@ -57,6 +57,11 @@ static struct user_slot user_slots[USER_MAX_TASKS];
 static struct task idle_task;
 static struct timer_event idle_status_timer;
 static volatile int idle_status_due;
+static const char *demo_paths[USER_MAX_TASKS] = {
+    "/bin/hello",
+    "/bin/hello",
+    "/bin/once",
+};
 static const struct user_spawn_args demo_tasks[USER_MAX_TASKS] = {
     {
         .name = "user-a",
@@ -73,7 +78,7 @@ static const struct user_spawn_args demo_tasks[USER_MAX_TASKS] = {
         .arg3 = 0,
     },
     {
-        .name = "user-c",
+        .name = "user-once",
         .arg0 = 2,
         .arg1 = 900,
         .arg2 = 1000,
@@ -385,7 +390,7 @@ int user_demo_run(void)
 
     for (uint64_t i = 0; i < USER_MAX_TASKS; i++)
     {
-        if (!user_spawn("/bin/hello", &demo_tasks[i]))
+        if (!user_spawn(demo_paths[i], &demo_tasks[i]))
         {
             return 0;
         }

@@ -18,7 +18,7 @@ U-mode 程序
 ```text
 kernel_entry()
   -> user_demo_run()：创建几个最小用户 task。
-     -> user_spawn("/bin/hello", args)：按路径加载用户 ELF，并创建对应 task。
+     -> user_spawn(path, args)：按路径加载用户 ELF，并创建对应 task。
         -> ramfs_lookup()：从 initramfs 找到用户 ELF 文件内容。
         -> vm_space_create()：创建独立用户页表。
         -> vm_copy_kernel_mappings()：复制内核 S-mode 映射，不继承 U-mode 映射。
@@ -97,10 +97,11 @@ file data bytes
 这里全部使用“相对镜像起点的 offset”，不用指针。原因是 `.initramfs` 会被链接器放进
 kernel ELF，最终物理地址由内核镜像位置决定；offset 格式不关心镜像被放在哪里。
 
-当前用户 demo 查询：
+当前用户 demo 会查询两个路径：
 
 ```text
 /bin/hello
+/bin/once
 ```
 
 查到文件后，`user_elf_load()` 会解析 ELF header 和 program header，把 `PT_LOAD`
@@ -128,7 +129,7 @@ PT_LOAD
 ```text
 user-a: 启动后 sleep 0.3s，每轮 sleep 1s，持续运行
 user-b: 启动后 sleep 0.6s，每轮 sleep 1s，持续运行
-user-c: 启动后 sleep 0.9s，每轮 sleep 1s，运行 8 轮后 exit
+user-once: 启动后 sleep 0.9s，输出一次后 exit
 idle  : 每 2s 打印一次 task 状态和 trap 统计
 ```
 
