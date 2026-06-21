@@ -24,7 +24,7 @@
 #define USER_STACK_PAGES 2ULL
 #define USER_TRAP_STACK_PAGES 2ULL
 #define USER_KERNEL_STACK_PAGES 4ULL
-#define USER_DEMO_TASK_COUNT 3ULL
+#define USER_MAX_TASKS 3ULL
 #define USER_IDLE_STACK_PAGES 2ULL
 #define USER_IDLE_STATUS_PERIOD_MS 2000ULL
 
@@ -45,12 +45,41 @@ struct user_task_start
     uint64_t arg3;
 };
 
-static struct task user_tasks[USER_DEMO_TASK_COUNT];
-static struct vm_space user_vms[USER_DEMO_TASK_COUNT];
-static struct user_task_start user_starts[USER_DEMO_TASK_COUNT];
+struct user_slot
+{
+    struct task task;
+    struct vm_space vm;
+    struct user_task_start start;
+    int used;
+};
+
+static struct user_slot user_slots[USER_MAX_TASKS];
 static struct task idle_task;
 static struct timer_event idle_status_timer;
 static volatile int idle_status_due;
+static const struct user_spawn_args demo_tasks[USER_MAX_TASKS] = {
+    {
+        .name = "user-a",
+        .arg0 = 0,
+        .arg1 = 300,
+        .arg2 = 1000,
+        .arg3 = 0,
+    },
+    {
+        .name = "user-b",
+        .arg0 = 1,
+        .arg1 = 600,
+        .arg2 = 1000,
+        .arg3 = 0,
+    },
+    {
+        .name = "user-c",
+        .arg0 = 2,
+        .arg1 = 900,
+        .arg2 = 1000,
+        .arg3 = 8,
+    },
+};
 
 static const char *task_state_name(enum task_state state)
 {
@@ -100,9 +129,12 @@ static void print_user_demo_status(void)
     struct trap_stats stats;
 
     printk("User demo task status\r\n");
-    for (uint64_t i = 0; i < USER_DEMO_TASK_COUNT; i++)
+    for (uint64_t i = 0; i < USER_MAX_TASKS; i++)
     {
-        print_task_line(&user_tasks[i]);
+        if (user_slots[i].used)
+        {
+            print_task_line(&user_slots[i].task);
+        }
     }
     print_task_line(&idle_task);
 
@@ -136,7 +168,30 @@ static void idle_status_timeout(struct timer_event *event, void *context)
     idle_status_due = 1;
 }
 
-static int load_user_image(struct vm_space *space, uint64_t *entry)
+static struct user_slot *alloc_user_slot(void)
+{
+    for (uint64_t i = 0; i < USER_MAX_TASKS; i++)
+    {
+        if (!user_slots[i].used)
+        {
+            user_slots[i].used = 1;
+            return &user_slots[i];
+        }
+    }
+
+    return 0;
+}
+
+static void release_user_slot(struct user_slot *slot)
+{
+    if (slot)
+    {
+        slot->used = 0;
+    }
+}
+
+static int load_user_image(const char *path, struct vm_space *space,
+                           uint64_t *entry)
 {
     struct ramfs_file file;
 
@@ -144,7 +199,7 @@ static int load_user_image(struct vm_space *space, uint64_t *entry)
      * 现在的 ramfs 只是启动期只读文件包，还不是正式文件系统。这里先用路径查出
      * 用户 ELF，再复用同一个 ELF loader；后续 exec 只需要把路径变成 syscall 参数。
      */
-    if (!ramfs_lookup("/bin/hello", &file))
+    if (!ramfs_lookup(path, &file))
     {
         printk("User ELF not found in initramfs\r\n");
         return 0;
@@ -185,19 +240,33 @@ static void user_idle_entry(void *arg)
     }
 }
 
-static int create_one_user_task(uint64_t index, const char *name,
-                                uint64_t startup_delay_ms,
-                                uint64_t loop_delay_ms,
-                                uint64_t repeat_count)
+int user_spawn(const char *path, const struct user_spawn_args *args)
 {
-    void *kernel_stack_phys = phys_alloc_pages(USER_KERNEL_STACK_PAGES);
-    void *user_stack_phys = phys_alloc_pages(USER_STACK_PAGES);
-    void *trap_stack_phys = phys_alloc_pages(USER_TRAP_STACK_PAGES);
+    struct user_slot *slot;
+    void *kernel_stack_phys;
+    void *user_stack_phys;
+    void *trap_stack_phys;
     uint64_t user_entry = 0;
     uint64_t kernel_stack_size = USER_KERNEL_STACK_PAGES * VM_PAGE_SIZE;
     uint64_t user_stack_size = USER_STACK_PAGES * VM_PAGE_SIZE;
     uint64_t trap_stack_size = USER_TRAP_STACK_PAGES * VM_PAGE_SIZE;
     uint64_t user_stack_base = USER_STACK_TOP - user_stack_size;
+
+    if (!path || !args)
+    {
+        return 0;
+    }
+
+    slot = alloc_user_slot();
+    if (!slot)
+    {
+        printk("User task slot unavailable\r\n");
+        return 0;
+    }
+
+    kernel_stack_phys = phys_alloc_pages(USER_KERNEL_STACK_PAGES);
+    user_stack_phys = phys_alloc_pages(USER_STACK_PAGES);
+    trap_stack_phys = phys_alloc_pages(USER_TRAP_STACK_PAGES);
 
     if (!kernel_stack_phys || !user_stack_phys || !trap_stack_phys)
     {
@@ -214,36 +283,40 @@ static int create_one_user_task(uint64_t index, const char *name,
             phys_free_pages(trap_stack_phys, USER_TRAP_STACK_PAGES);
         }
         printk("User task stack allocation failed\r\n");
+        release_user_slot(slot);
         return 0;
     }
 
-    if (!vm_space_create(&user_vms[index]))
+    if (!vm_space_create(&slot->vm))
     {
         printk("User page table allocation failed\r\n");
         phys_free_pages(kernel_stack_phys, USER_KERNEL_STACK_PAGES);
         phys_free_pages(user_stack_phys, USER_STACK_PAGES);
         phys_free_pages(trap_stack_phys, USER_TRAP_STACK_PAGES);
+        release_user_slot(slot);
         return 0;
     }
 
-    if (!vm_copy_kernel_mappings(&user_vms[index], kernel_vm_space()))
+    if (!vm_copy_kernel_mappings(&slot->vm, kernel_vm_space()))
     {
         printk("User kernel mapping copy failed\r\n");
         phys_free_pages(kernel_stack_phys, USER_KERNEL_STACK_PAGES);
         phys_free_pages(user_stack_phys, USER_STACK_PAGES);
         phys_free_pages(trap_stack_phys, USER_TRAP_STACK_PAGES);
+        release_user_slot(slot);
         return 0;
     }
 
-    if (!load_user_image(&user_vms[index], &user_entry))
+    if (!load_user_image(path, &slot->vm, &user_entry))
     {
         phys_free_pages(kernel_stack_phys, USER_KERNEL_STACK_PAGES);
         phys_free_pages(user_stack_phys, USER_STACK_PAGES);
         phys_free_pages(trap_stack_phys, USER_TRAP_STACK_PAGES);
+        release_user_slot(slot);
         return 0;
     }
 
-    if (!vm_map_range(&user_vms[index], user_stack_base,
+    if (!vm_map_range(&slot->vm, user_stack_base,
                       (uint64_t)(uintptr_t)user_stack_phys,
                       user_stack_size,
                       VM_MAP_READ | VM_MAP_WRITE | VM_MAP_USER))
@@ -252,29 +325,31 @@ static int create_one_user_task(uint64_t index, const char *name,
         phys_free_pages(kernel_stack_phys, USER_KERNEL_STACK_PAGES);
         phys_free_pages(user_stack_phys, USER_STACK_PAGES);
         phys_free_pages(trap_stack_phys, USER_TRAP_STACK_PAGES);
+        release_user_slot(slot);
         return 0;
     }
 
-    user_starts[index].entry = user_entry;
-    user_starts[index].user_stack_top = USER_STACK_TOP;
-    user_starts[index].trap_stack_top =
+    slot->start.entry = user_entry;
+    slot->start.user_stack_top = USER_STACK_TOP;
+    slot->start.trap_stack_top =
         (uint64_t)(uintptr_t)trap_stack_phys + trap_stack_size;
-    user_starts[index].arg0 = index;
-    user_starts[index].arg1 = startup_delay_ms;
-    user_starts[index].arg2 = loop_delay_ms;
-    user_starts[index].arg3 = repeat_count;
+    slot->start.arg0 = args->arg0;
+    slot->start.arg1 = args->arg1;
+    slot->start.arg2 = args->arg2;
+    slot->start.arg3 = args->arg3;
 
-    if (!task_create(&user_tasks[index], name, kernel_stack_phys,
-                     kernel_stack_size, user_task_entry, &user_starts[index]))
+    if (!task_create(&slot->task, args->name, kernel_stack_phys,
+                     kernel_stack_size, user_task_entry, &slot->start))
     {
         printk("User task create failed\r\n");
         phys_free_pages(kernel_stack_phys, USER_KERNEL_STACK_PAGES);
         phys_free_pages(user_stack_phys, USER_STACK_PAGES);
         phys_free_pages(trap_stack_phys, USER_TRAP_STACK_PAGES);
+        release_user_slot(slot);
         return 0;
     }
 
-    user_tasks[index].vm_space = &user_vms[index];
+    slot->task.vm_space = &slot->vm;
     return 1;
 }
 
@@ -308,19 +383,12 @@ int user_demo_run(void)
         return 0;
     }
 
-    if (!create_one_user_task(0, "user-a", 300, 1000, 0))
+    for (uint64_t i = 0; i < USER_MAX_TASKS; i++)
     {
-        return 0;
-    }
-
-    if (!create_one_user_task(1, "user-b", 600, 1000, 0))
-    {
-        return 0;
-    }
-
-    if (!create_one_user_task(2, "user-c", 900, 1000, 8))
-    {
-        return 0;
+        if (!user_spawn("/bin/hello", &demo_tasks[i]))
+        {
+            return 0;
+        }
     }
 
     if (!create_idle_task())

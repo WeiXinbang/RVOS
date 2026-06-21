@@ -18,11 +18,11 @@ U-mode 程序
 ```text
 kernel_entry()
   -> user_demo_run()：创建几个最小用户 task。
-     -> create_one_user_task()：为每个 task 准备用户页表、用户栈、trap 栈和内核启动栈。
+     -> user_spawn("/bin/hello", args)：按路径加载用户 ELF，并创建对应 task。
+        -> ramfs_lookup()：从 initramfs 找到用户 ELF 文件内容。
         -> vm_space_create()：创建独立用户页表。
         -> vm_copy_kernel_mappings()：复制内核 S-mode 映射，不继承 U-mode 映射。
-        -> load_user_image()
-           -> user_elf_load()：解析内核携带的 hello.elf blob，按 PT_LOAD 建立用户映射。
+        -> user_elf_load()：解析 ELF header/program header，按 PT_LOAD 建立用户映射。
         -> vm_map_range()：把本 task 的用户栈映射到用户虚拟地址。
         -> task_create()：创建内核调度对象，第一次运行时跳到 user_task_entry()。
      -> create_idle_task()：创建最小 idle task，所有用户 task sleep/exit 后仍有执行流。
@@ -30,6 +30,10 @@ kernel_entry()
   -> user_task_entry()
      -> riscv_enter_user()：设置 sepc/sstatus/sscratch 和初始 a0/a1/a2/a3，然后 sret 到 U-mode。
 ```
+
+`user_spawn()` 是当前内核侧的程序创建入口。它还不是 syscall，也不处理用户传入的
+argv/envp；但用户页表、ELF 加载、用户栈、trap 栈和 task 创建都已经集中到这里。
+后续实现 `exec` 时，应该优先复用这条路径，而不是在 syscall 里重新拼一遍加载流程。
 
 用户程序执行：
 
